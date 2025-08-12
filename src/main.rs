@@ -1,13 +1,13 @@
 mod ccerror;
+mod lexer;
 mod source;
 
-use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
+use std::str::FromStr;
 
 use clap::Parser;
 
-use ccerror::CcError;
 use source::Source;
 
 #[derive(clap::Parser)]
@@ -25,25 +25,36 @@ struct SourceFile {
     source: Source,
 }
 
-fn open_source(name: &PathBuf) -> Result<SourceFile, CcError> {
-    let text = match fs::read_to_string(&name) {
-        Ok(text) => text,
+fn main() {
+    let args = Args::parse();
+
+    let mut source = Source::new();
+
+    match source.push_file(&args.source_file) {
+        Ok(()) => {},
         Err(e) => {
-            eprintln!("failed to read source file {}: {}", name.to_string_lossy(), e);
-            exit(1);            
+            eprintln!("{}: {}", args.source_file.to_string_lossy(), e);
+            exit(1);
         }
     };
 
-    let source = text.chars().collect();
+    loop {
+        if let Some(ch) = source.next() {
+            println!("{}@{}:{}: {} ", 
+                source.get_filename(ch.pt.file).unwrap(), 
+                ch.pt.line, 
+                ch.pt.col, 
+                ch.ch); 
 
-    let source = Source::new(source);
+            if ch.pt.line == 14 && ch.pt.col == 15 {
+                source.push_file(&PathBuf::from_str("../rustcc/testdata/test.c").unwrap()).unwrap();
+            }
 
-    Ok(SourceFile{ name: name.clone(), source })
-}
+        } else {
+            break;
+        }
+    }
 
-fn main() {
-    let args = Args::parse();
-    let source = open_source(&args.source_file);
 
     
 }
