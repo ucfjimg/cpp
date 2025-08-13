@@ -34,6 +34,7 @@ pub struct SourceFile {
 
 /// A pointer for iterating through a source file.
 /// 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourcePointer {
     /// Index of the file being iterated.
     pub file: u32,
@@ -166,7 +167,7 @@ impl Source {
         Ok(())
     } 
 
-    fn push_data(&mut self, name: &PathBuf, text: Vec<char>) {
+    pub fn push_data(&mut self, name: &PathBuf, text: Vec<char>) {
         let file = self.files.len() as u32;
 
         self.files.push(SourceFile{ 
@@ -230,6 +231,93 @@ impl Source {
             Some(SourceChar{ ch, pt })
         }
     }
+
+    /// Peek the n'th character. peek_n(0) returns the next character.
+    /// 
+    pub fn peek_n(&self, mut n: u32) -> Option<SourceChar> {
+        //
+        // We clone the iters array for skipping `n` characters. We don't need or
+        // want to clone the source itself as that's a lot bigger and doesn't change.        
+        //
+        let mut iters = self.iters.clone();
+
+        while n > 0 {
+            let sp = iters.last().unwrap();
+            let file = &self.files[sp.file as usize];
+            
+            let (sp, _ch) = Source::extract_one_char(file, sp);
+
+            *iters.last_mut().unwrap() = sp;
+        
+            loop {
+                match iters.last() {
+                    Some(sp) => {
+                        if sp.next < self.files[sp.file as usize].text.len() {
+                            break;
+                        }
+                        iters.pop();
+                    },
+                    None => return None,
+                }
+            }
+    
+            n -= 1;
+        }
+
+        match iters.last() {
+            Some(sp) => {
+                let file = &self.files[sp.file as usize];
+                assert!(sp.next < file.text.len());
+        
+                let ch = file.text[sp.next as usize];
+                let ch = if ch == '\r' { '\n' } else { ch };
+                let pt = sp.next_loc;
+        
+                Some(SourceChar{ ch, pt })
+
+            },            
+            None => None,
+        }
+    }
+
+    fn extract_one_char(file: &SourceFile, iter: &SourcePointer) -> (SourcePointer, SourceChar) {
+        let mut sp = *iter;
+
+        assert!(iter.next < file.text.len());
+
+        //
+        // Handle CR, LF, CR/LF, LF/CR. The next layer depends on just
+        // having \n to compute line splicing.         
+        // 
+        let ch = file.text[sp.next as usize];
+        let pt = sp.next_loc;
+
+        let ch = match ch {
+            '\r' | '\n' => {
+                sp.next += 1;
+
+                if sp.next < file.text.len() {
+                    let next_ch = file.text[sp.next as usize];
+                    if (ch == '\r' && next_ch == '\n') || (ch == '\n' && next_ch == '\r') {
+                        sp.next += 1;
+                    }
+                }
+
+                sp.next_loc.col = 1;
+                sp.next_loc.line += 1;
+
+                '\n'
+            },
+            ch => {
+                sp.next += 1;
+                sp.next_loc.col += 1;
+                ch
+            },
+        };
+
+        (sp, SourceChar{ ch, pt })
+    }
+
 }
 
 impl Iterator for Source {
@@ -244,49 +332,146 @@ impl Iterator for Source {
         //
         if self.iters.is_empty() {
             None 
-        } else {
-            let sp = self.iters.last_mut().unwrap();
+        } else {            
+            let sp = self.iters.last().unwrap();
             let file = &self.files[sp.file as usize];
-            assert!(sp.next < file.text.len());
-            //
-            // Handle CR, LF, CR/LF, LF/CR. The next layer depends on just
-            // having \n to compute line splicing.         
-            // 
-            let ch = file.text[sp.next as usize];
-            let pt = sp.next_loc;
+            
+            let (sp, ch) = Source::extract_one_char(file, sp);
 
-            let ch = match ch {
-                '\r' | '\n' => {
-                    sp.next += 1;
-
-                    if sp.next < file.text.len() {
-                        let next_ch = file.text[sp.next as usize];
-                        if (ch == '\r' || next_ch == '\n') || (ch == '\n' || next_ch == '\r') {
-                            sp.next += 1;
-                        }
-                    }
-
-                    sp.next_loc.col = 1;
-                    sp.next_loc.line += 1;
-
-                    '\n'
-                },
-                ch => {
-                    sp.next += 1;
-                    sp.next_loc.col += 1;
-                    ch
-                },
-            };
-
+            *self.iters.last_mut().unwrap() = sp;
+        
             self.pop_nested();
 
-            Some(SourceChar{ ch, pt })
+            Some(ch)
         }
 
     }   
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn gets_characters() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['a', 'b', 'c'];
+
+        source.push_data(&PathBuf::new(), text);
+
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 1, col: 3 }})));
+        assert!(matches!(source.next(), None));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn gets_characters_with_newline() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['a', '\n', 'c'];
+
+        source.push_data(&PathBuf::new(), text);
+
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), None));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn cr_lf_is_one_newline() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['a', '\r', '\n', 'c'];
+
+        source.push_data(&PathBuf::new(), text);
+
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), None));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn lf_cr_is_one_newline() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['a', '\n', '\r', 'c'];
+
+        source.push_data(&PathBuf::new(), text);
+
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), None));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn cr_counts_as_newline() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['a', '\r', 'c'];
+
+        source.push_data(&PathBuf::new(), text);
+
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), None));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn files_nest() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text1 = vec!['a', '\n', 'b'];
+        let text2 = vec!['c', 'd', 'e'];
+
+        source.push_data(&PathBuf::from("abc"), text1);
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        source.push_data(&PathBuf::from("def"), text2);
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'e', pt: Point{ file: 1, line: 1, col: 3 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), None));
+
+        Ok(())
+    }
+
+    #[test]
+    fn peek_multiple() -> Result<(), CcError> {
+
+        let mut source = Source::new();
+        let text1 = vec!['a', '\n', 'b'];
+        let text2 = vec!['c', 'd', 'e'];
+
+        source.push_data(&PathBuf::from("abc"), text1);
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        source.push_data(&PathBuf::from("def"), text2);
+
+        assert!(matches!(source.peek(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
+        assert!(matches!(source.peek_n(0), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
+        assert!(matches!(source.peek_n(1), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }})));
+        assert!(matches!(source.peek_n(3), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }})));
+
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'e', pt: Point{ file: 1, line: 1, col: 3 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), None));
+
+        Ok(())
+    }
+}
 
 
 /***
