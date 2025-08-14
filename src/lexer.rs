@@ -66,14 +66,13 @@ pub enum PpToken {
     
 
     // never returned
-
     BlockComment,
     LineComment,
 
-    // other
-    
+    // other    
     Eof
 }
+
 
 #[derive(Debug)]
 struct OpNode {
@@ -259,16 +258,25 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
             Some(PpToken::BlockComment) => {
                 skip_block_comment(source, ch.pt)?;
                 emit.push(' ');
+                continue;
             },
             Some(PpToken::LineComment) => {
                 skip_line_comment(source, ch.pt)?;
                 emit.push(' ');
+                continue;
             },
             Some(op) => return Ok(op),
-            _ => break,
+            None => {}, 
         };
-    }
 
+        match peek_spliced(source) {
+            Some(ch) => {
+                next_spliced(source);
+                return Ok(PpToken::Other(ch.ch));
+            },
+            _ => break,
+        }
+    }
 
     Ok(PpToken::Eof)
 }
@@ -941,6 +949,22 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::StringLiteral("\\\"".to_string());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
+        Ok(())
+    }
+
+    #[test]
+    fn random_character_are_other() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['$', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        let id = PpToken::Other('$');
         assert_eq!(next_token(&mut source, &mut emit), Ok(id));
         assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
 
