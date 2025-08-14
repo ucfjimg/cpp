@@ -10,7 +10,7 @@ pub enum PpToken {
     Identifier(String),
     StringLiteral(Vec<char>),
     Number(String),
-    CharLiteral(char),
+    CharLiteral(String),
 
     // operators
 
@@ -237,6 +237,14 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
         }
 
         //
+        // Character literal?
+        //
+        if ch.ch == '\'' {
+            next_spliced(source);
+            return charlit(source, ch.pt);
+        }
+
+        //
         // Operator?    
         //    
         match lookup_op(source, &OPERATORS) {
@@ -334,9 +342,126 @@ fn ppnumber(source: &mut Source) -> PpToken {
     }
 
     PpToken::Number(numchars.into_iter().collect())
+}
 
+fn charlit(source: &mut Source, pt: Point) -> Result<PpToken, CcError> {
+    let mut chars = Vec::new();
+
+    loop {
+        match peek_spliced(source) {
+            Some(ch) => {
+                match ch.ch {
+                    '\n' => {
+                        return Err(
+                            CcError::err_with_loc(
+                                "unterminated character constant".to_string(), 
+                                pt
+                            )
+                        )
+                    }, 
+                    '\'' => {
+                        next_spliced(source);
+                        break;
+                    },
+                    '\\' => {
+                        next_spliced(source);
+                        escape_sequence(source, &mut chars, pt)?;
+                    },
+                    ch => {
+                        chars.push(ch);
+                        next_spliced(source);
+                    }
+                };
+            },
+            _ => {
+                return Err(
+                    CcError::err_with_loc(
+                        "unterminated character constant".to_string(), 
+                        pt
+                    )
+                )
+            },
+        }
+    }
     
+     Ok(PpToken::CharLiteral(chars.into_iter().collect()))
+}
 
+fn escape_sequence(source: &mut Source, accum: &mut Vec<char>, pt: Point) -> Result<(), CcError> {
+    
+    //
+    // Note that the preprocessor is not responsible for converting escape
+    // sequences, it just needs to know enough to parse character and string
+    // constants with embedded quotes.
+    //    
+    accum.push('\\');
+    match peek_spliced(source) {
+        Some(ch) => {
+            match ch.ch {
+                'x' => {
+                    accum.push('x');
+                    next_spliced(source);
+
+                    loop {
+                        let ch = match peek_spliced(source) {
+                            Some(ch) => ch.ch,
+                            None => {
+                                return Err(
+                                    CcError::err_with_loc(
+                                        "unterminated escape sequence".to_string(),
+                                        pt
+                                    )
+                                )
+                            }
+                        };
+
+                        if !ch.is_ascii_hexdigit() {
+                            break;
+                        }
+
+                        accum.push(ch);
+                        next_spliced(source);
+                    }
+                },
+                '0'..='7' => {
+                    accum.push(ch.ch);
+
+                    loop {
+                        let ch = match peek_spliced(source) {
+                            Some(ch) => ch.ch,
+                            None => {
+                                return Err(
+                                    CcError::err_with_loc(
+                                        "unterminated escape sequence".to_string(),
+                                        pt
+                                    )
+                                )
+                            }
+                        };
+
+                        if !ch.is_ascii_digit() && ch != '8' && ch != '9' {
+                            break;
+                        }
+
+                        accum.push(ch);
+                        next_spliced(source);
+                    }
+                },
+                ch => {
+                    accum.push(ch);
+                    next_spliced(source);
+                }
+            }
+        },
+        _ => return Err(
+            CcError::err_with_loc(
+                "unterminated escape sequence".to_string(),
+                pt
+            )
+        )
+    }
+
+    Ok(())
 }
 
 /// Given that the lead characters of a block comment (i.e. /*) have been
@@ -705,6 +830,53 @@ mod tests {
         let id = PpToken::Number("31416".to_string());
         assert_eq!(next_token(&mut source, &mut emit), Ok(id));
         assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        Ok(())
+    }
+
+    #[test]
+    fn char_const() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['\'', 'a', '\'', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        let id = PpToken::CharLiteral("a".to_string());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unterminated_char_const() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['\'', 'a', '\n', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        assert!(next_token(&mut source, &mut emit).is_err());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
+        Ok(())
+    }
+
+    #[test]
+    fn char_const_escaped_quote() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['\'', '\\', '\'', '\'', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        let id = PpToken::CharLiteral("\\'".to_string());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
         Ok(())
     }
 }
