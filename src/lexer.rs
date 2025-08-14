@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum PpToken {
     Identifier(String),
-    StringLiteral(Vec<char>),
+    StringLiteral(String),
     Number(String),
     CharLiteral(String),
 
@@ -241,7 +241,15 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
         //
         if ch.ch == '\'' {
             next_spliced(source);
-            return charlit(source, ch.pt);
+            return textlit(source, true, ch.pt);
+        }
+
+        //
+        // String literal?
+        //
+        if ch.ch == '\"' {
+            next_spliced(source);
+            return textlit(source, false, ch.pt);
         }
 
         //
@@ -344,7 +352,9 @@ fn ppnumber(source: &mut Source) -> PpToken {
     PpToken::Number(numchars.into_iter().collect())
 }
 
-fn charlit(source: &mut Source, pt: Point) -> Result<PpToken, CcError> {
+/// Collect a character or a string literal.
+/// 
+fn textlit(source: &mut Source, is_char: bool, pt: Point) -> Result<PpToken, CcError> {
     let mut chars = Vec::new();
 
     loop {
@@ -359,7 +369,11 @@ fn charlit(source: &mut Source, pt: Point) -> Result<PpToken, CcError> {
                             )
                         )
                     }, 
-                    '\'' => {
+                    '\'' if is_char => {
+                        next_spliced(source);
+                        break;
+                    },
+                    '"' if !is_char => {
                         next_spliced(source);
                         break;
                     },
@@ -384,9 +398,15 @@ fn charlit(source: &mut Source, pt: Point) -> Result<PpToken, CcError> {
         }
     }
     
-     Ok(PpToken::CharLiteral(chars.into_iter().collect()))
+    if is_char {
+        Ok(PpToken::CharLiteral(chars.into_iter().collect()))
+    } else {
+        Ok(PpToken::StringLiteral(chars.into_iter().collect()))
+    }
 }
 
+/// Collect an escape sequence inside a character or string literal.
+/// 
 fn escape_sequence(source: &mut Source, accum: &mut Vec<char>, pt: Point) -> Result<(), CcError> {
     
     //
@@ -874,6 +894,53 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::CharLiteral("\\'".to_string());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
+        Ok(())
+    }
+
+    #[test]
+    fn str_const() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['\"', 'a', 'b', 'c', '\"', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        let id = PpToken::StringLiteral("abc".to_string());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unterminated_str_const() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['\"', 'a', '\n', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        assert!(next_token(&mut source, &mut emit).is_err());
+        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+
+        Ok(())
+    }
+
+    #[test]
+    fn str_const_escaped_quote() -> Result<(), CcError> {
+        let mut source = Source::new();
+        let text = vec!['"', '\\', '"', '"', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+        
+        let id = PpToken::StringLiteral("\\\"".to_string());
         assert_eq!(next_token(&mut source, &mut emit), Ok(id));
         assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
 
