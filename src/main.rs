@@ -55,6 +55,11 @@ fn main() {
         }
     }
 
+    let mut emit = Vec::new();
+    match lexer::next_token(&mut source, &mut emit) {
+        Ok(token) => println!("{:?}", token),
+        Err(e) => println!("err {}", e),
+    };
 
     
 }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// A location in the source code, for errors.
 /// 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Point {
     /// The index of the source file the token came from.
     pub file: u32,
@@ -55,6 +55,9 @@ pub struct SourceChar {
 
     /// Its original position in the file.
     pub pt: Point,
+
+    /// Is this the first character after a file switch?
+    pub switched: bool,
 }
 
 /// The state for reading characters across all source files.
@@ -65,7 +68,11 @@ pub struct Source {
 
     /// Nested stack of file pointers. The first will be the main
     /// source file.
-    pub iters: Vec<SourcePointer>,    
+    pub iters: Vec<SourcePointer>,
+
+    /// The current file changed, but a character has not been read
+    /// from it yet.
+    pub switched: bool, 
 }
 
 /// An iterator to take source characters while a predicate is true. Unlike
@@ -113,6 +120,7 @@ impl Source {
         Source {
             files: Vec::new(),
             iters: Vec::new(),
+            switched: false,
         }
     }
 
@@ -133,6 +141,7 @@ impl Source {
                 };
 
                 self.iters.push(ptr);
+                self.switched = true;
                 return Ok(())
             },
             None => {},
@@ -161,6 +170,7 @@ impl Source {
         };
 
         self.iters.push(ptr);
+        self.switched = true;
 
         self.pop_nested();
 
@@ -186,6 +196,7 @@ impl Source {
         };
 
         self.iters.push(ptr);
+        self.switched = true;
 
         self.pop_nested();
     }
@@ -197,6 +208,7 @@ impl Source {
                     if sp.next < self.files[sp.file as usize].text.len() {
                         break;
                     }
+                    self.switched = true;
                     self.iters.pop();
                 },
                 None => break,
@@ -228,7 +240,7 @@ impl Source {
             let ch = if ch == '\r' { '\n' } else { ch };
             let pt = sp.next_loc;
 
-            Some(SourceChar{ ch, pt })
+            Some(SourceChar{ ch, pt, switched: self.switched })
         }
     }
 
@@ -240,28 +252,38 @@ impl Source {
         // want to clone the source itself as that's a lot bigger and doesn't change.        
         //
         let mut iters = self.iters.clone();
+        let mut switched = self.switched;
 
-        while n > 0 {
-            let sp = iters.last().unwrap();
-            let file = &self.files[sp.file as usize];
-            
-            let (sp, _ch) = Source::extract_one_char(file, sp);
-
-            *iters.last_mut().unwrap() = sp;
-        
+        if n > 0 {
             loop {
-                match iters.last() {
-                    Some(sp) => {
-                        if sp.next < self.files[sp.file as usize].text.len() {
-                            break;
-                        }
-                        iters.pop();
-                    },
-                    None => return None,
+                switched = false;
+
+                let sp = iters.last().unwrap();
+                let file = &self.files[sp.file as usize];
+                
+                let (sp, _ch) = Source::extract_one_char(file, sp);
+
+                *iters.last_mut().unwrap() = sp;
+            
+                loop {
+                    match iters.last() {
+                        Some(sp) => {
+                            if sp.next < self.files[sp.file as usize].text.len() {
+                                break;
+                            }
+                            iters.pop();
+                            switched = true;
+                        },
+                        None => return None,
+                    }
+                }
+        
+                n -= 1;
+
+                if n == 0 {
+                    break;
                 }
             }
-    
-            n -= 1;
         }
 
         match iters.last() {
@@ -273,8 +295,7 @@ impl Source {
                 let ch = if ch == '\r' { '\n' } else { ch };
                 let pt = sp.next_loc;
         
-                Some(SourceChar{ ch, pt })
-
+                Some(SourceChar{ ch, pt, switched })
             },            
             None => None,
         }
@@ -315,7 +336,7 @@ impl Source {
             },
         };
 
-        (sp, SourceChar{ ch, pt })
+        (sp, SourceChar{ ch, pt,switched: false })
     }
 
 }
@@ -335,8 +356,19 @@ impl Iterator for Source {
         } else {            
             let sp = self.iters.last().unwrap();
             let file = &self.files[sp.file as usize];
+            let switched = self.switched;
             
             let (sp, ch) = Source::extract_one_char(file, sp);
+
+            let ch = if switched {
+                println!("switched");
+                self.switched = false;
+                SourceChar{switched: true, ..ch}
+            } else {
+                println!("not switched");
+                ch
+            };
+
 
             *self.iters.last_mut().unwrap() = sp;
         
@@ -359,9 +391,9 @@ mod tests {
 
         source.push_data(&PathBuf::new(), text);
 
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 1, col: 3 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 1, col: 3 }, switched: false})));
         assert!(matches!(source.next(), None));
         
         Ok(())
@@ -374,9 +406,9 @@ mod tests {
 
         source.push_data(&PathBuf::new(), text);
 
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }, switched: false})));
         assert!(matches!(source.next(), None));
         
         Ok(())
@@ -389,9 +421,9 @@ mod tests {
 
         source.push_data(&PathBuf::new(), text);
 
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }, switched: false})));
         assert!(matches!(source.next(), None));
         
         Ok(())
@@ -404,9 +436,9 @@ mod tests {
 
         source.push_data(&PathBuf::new(), text);
 
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }, switched: false})));
         assert!(matches!(source.next(), None));
         
         Ok(())
@@ -419,9 +451,9 @@ mod tests {
 
         source.push_data(&PathBuf::new(), text);
 
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 0, line: 2, col: 1 }, switched: false})));
         assert!(matches!(source.next(), None));
         
         Ok(())
@@ -434,13 +466,13 @@ mod tests {
         let text2 = vec!['c', 'd', 'e'];
 
         source.push_data(&PathBuf::from("abc"), text1);
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
         source.push_data(&PathBuf::from("def"), text2);
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'e', pt: Point{ file: 1, line: 1, col: 3 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'e', pt: Point{ file: 1, line: 1, col: 3 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }, switched: true})));
         assert!(matches!(source.next(), None));
 
         Ok(())
@@ -454,19 +486,19 @@ mod tests {
         let text2 = vec!['c', 'd', 'e'];
 
         source.push_data(&PathBuf::from("abc"), text1);
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'a', pt: Point{ file: 0, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: '\n', pt: Point{ file: 0, line: 1, col: 2 }, switched: false})));
         source.push_data(&PathBuf::from("def"), text2);
 
-        assert!(matches!(source.peek(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
-        assert!(matches!(source.peek_n(0), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
-        assert!(matches!(source.peek_n(1), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }})));
-        assert!(matches!(source.peek_n(3), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.peek(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.peek_n(0), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.peek_n(1), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.peek_n(3), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }, switched: true})));
 
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'e', pt: Point{ file: 1, line: 1, col: 3 }})));
-        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'c', pt: Point{ file: 1, line: 1, col: 1 }, switched: true})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'd', pt: Point{ file: 1, line: 1, col: 2 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'e', pt: Point{ file: 1, line: 1, col: 3 }, switched: false})));
+        assert!(matches!(source.next(), Some(SourceChar { ch: 'b', pt: Point{ file: 0, line: 2, col: 1 }, switched: true})));
         assert!(matches!(source.next(), None));
 
         Ok(())

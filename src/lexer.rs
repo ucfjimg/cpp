@@ -73,6 +73,22 @@ pub enum PpToken {
     Eof
 }
 
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
+pub struct MetaToken {
+    pub token: PpToken,
+    pub loc: Point,
+    pub starts_line: bool,
+}
+
+impl MetaToken {
+    fn new(token: PpToken, loc: Point, starts_line: bool) -> Self {
+        MetaToken {
+            token,
+            loc,
+            starts_line
+        }
+    }
+}
 
 #[derive(Debug)]
 struct OpNode {
@@ -190,8 +206,8 @@ lazy_static! {
 /// 
 /// Any whitespace before the token will be appended to the `emit` vector.
 /// 
-pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, CcError> {
-    let mut newline = false;
+pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<MetaToken, CcError> {
+    let mut newline = source.switched;
     
     //
     // Whitespace
@@ -199,7 +215,7 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
     loop {
         let ch = match peek_spliced(source) {
             Some(ch) => ch,
-            None => return Ok(PpToken::Eof)
+            None => return Ok(MetaToken::new(PpToken::Eof, Point{ file: 0, line: 0, col: 0}, false)),
         };
 
         if ch.ch.is_ascii_whitespace() {
@@ -211,11 +227,13 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
             continue;
         }
 
+        let pt = ch.pt;
+
         //
         // Identifier?
         //
         if ch.ch.is_ascii_alphabetic() || ch.ch == '_' {
-            return Ok(identifier(source));
+            return Ok(MetaToken::new(identifier(source), pt, newline));
         }
         
         //
@@ -232,7 +250,7 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
         };
 
         if is_number {
-            return Ok(ppnumber(source));
+            return Ok(MetaToken::new(ppnumber(source), pt, newline));
         }
 
         //
@@ -240,7 +258,8 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
         //
         if ch.ch == '\'' {
             next_spliced(source);
-            return textlit(source, true, ch.pt);
+            let token = textlit(source, true, ch.pt)?;
+            return Ok(MetaToken::new(token, pt, newline));
         }
 
         //
@@ -248,7 +267,8 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
         //
         if ch.ch == '\"' {
             next_spliced(source);
-            return textlit(source, false, ch.pt);
+            let token = textlit(source, false, ch.pt)?;
+            return Ok(MetaToken::new(token, pt, newline));
         }
 
         //
@@ -261,24 +281,24 @@ pub fn next_token(source: &mut Source, emit: &mut Vec<char>) -> Result<PpToken, 
                 continue;
             },
             Some(PpToken::LineComment) => {
-                skip_line_comment(source, ch.pt)?;
+                skip_line_comment(source)?;
                 emit.push(' ');
                 continue;
             },
-            Some(op) => return Ok(op),
+            Some(op) => return Ok(MetaToken::new(op, pt, newline)),
             None => {}, 
         };
 
         match peek_spliced(source) {
             Some(ch) => {
                 next_spliced(source);
-                return Ok(PpToken::Other(ch.ch));
+                return Ok(MetaToken::new(PpToken::Other(ch.ch), pt, newline));
             },
             _ => break,
         }
     }
 
-    Ok(PpToken::Eof)
+    Ok(MetaToken::new(PpToken::Eof, Point{ file: 0, line: 0, col: 0}, false))
 }
 
 /// Collect an identifier. The caller must have verified that the next 
@@ -500,7 +520,7 @@ fn skip_block_comment(source: &mut Source, loc: Point) -> Result<(), CcError> {
     let mut last_star = false;
     
     loop {
-        let ch = match next_spliced(source) {            
+        match next_spliced(source) {            
             Some(ch) => {
                 match ch.ch {
                     '*' => last_star = true,
@@ -525,7 +545,7 @@ fn skip_block_comment(source: &mut Source, loc: Point) -> Result<(), CcError> {
 /// Given that the lead characters of a line comment (i.e. //) have been
 /// consumed, scan and discard source until the end of the line.
 ///
-fn skip_line_comment(source: &mut Source, loc: Point) -> Result<(), CcError> {
+fn skip_line_comment(source: &mut Source) -> Result<(), CcError> {
     loop {
         match next_spliced(source) {
             Some(ch) if ch.ch == '\n' => {
@@ -663,7 +683,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
 
         Ok(())
     }
@@ -679,7 +699,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
 
         Ok(())
     }
@@ -695,7 +715,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ', ' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
 
         let text = vec![' ', '/', '*', '/', '\n', '*', '/', '=', '='];
 
@@ -705,7 +725,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ', ' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
         Ok(())
     }
 
@@ -720,7 +740,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ', ' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
 
         Ok(())
     }
@@ -736,7 +756,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ', ' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
 
         Ok(())
     }
@@ -752,7 +772,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ', ' ']);
-        assert_eq!(token, PpToken::Equal);
+        assert_eq!(token.token, PpToken::Equal);
 
         let mut source = Source::new();
         let text = vec!['/', '/', ' ', '*', '\\', '\n', '=', '\n', '*'];
@@ -763,7 +783,7 @@ mod tests {
         let token = next_token(&mut source, &mut emit)?;
 
         assert_eq!(emit, vec![' ']);
-        assert_eq!(token, PpToken::Star);
+        assert_eq!(token.token, PpToken::Star);
 
         Ok(())
     }
@@ -775,7 +795,7 @@ mod tests {
 
         source.push_data(&PathBuf::from("abc"), text);
 
-        assert!(matches!(peek_spliced(&source), Some(SourceChar{ch: '*', pt: Point { file: 0, line: 3, col: 1 } })));
+        assert!(matches!(peek_spliced(&source), Some(SourceChar{ch: '*', pt: Point { file: 0, line: 3, col: 1 }, switched: false })));
 
         Ok(())
     }
@@ -787,8 +807,8 @@ mod tests {
 
         source.push_data(&PathBuf::from("abc"), text);
 
-        assert!(matches!(peek_spliced(&source), Some(SourceChar{ch: '+', pt: Point { file: 0, line: 2, col: 1 } })));
-        assert!(matches!(peek_spliced_n(&source, 1), Some(SourceChar{ch: '*', pt: Point { file: 0, line: 3, col: 1 } })));
+        assert!(matches!(peek_spliced(&source), Some(SourceChar{ch: '+', pt: Point { file: 0, line: 2, col: 1 }, switched: false  })));
+        assert!(matches!(peek_spliced_n(&source, 1), Some(SourceChar{ch: '*', pt: Point { file: 0, line: 3, col: 1 }, switched: false  })));
 
         Ok(())
     }
@@ -802,10 +822,10 @@ mod tests {
         let mut emit = Vec::new();
 
         let id = PpToken::Identifier("abc".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Add));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Add);
         let id = PpToken::Identifier("x".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
 
         Ok(())
     }
@@ -823,9 +843,9 @@ mod tests {
 
         let mut emit = Vec::new();
 
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Dot));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Dot);
         let id = PpToken::Identifier("b".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
         Ok(())
     }
 
@@ -842,8 +862,8 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::Number(".31e-0".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
         
         //
         // A digit starts a pp-number
@@ -856,8 +876,8 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::Number("31416".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
         Ok(())
     }
 
@@ -871,8 +891,8 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::CharLiteral("a".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
 
         Ok(())
     }
@@ -887,7 +907,7 @@ mod tests {
         let mut emit = Vec::new();
         
         assert!(next_token(&mut source, &mut emit).is_err());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
 
         Ok(())
     }
@@ -902,8 +922,8 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::CharLiteral("\\'".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
 
         Ok(())
     }
@@ -918,8 +938,8 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::StringLiteral("abc".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
 
         Ok(())
     }
@@ -934,7 +954,7 @@ mod tests {
         let mut emit = Vec::new();
         
         assert!(next_token(&mut source, &mut emit).is_err());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
 
         Ok(())
     }
@@ -949,8 +969,8 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::StringLiteral("\\\"".to_string());
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
 
         Ok(())
     }
@@ -965,8 +985,75 @@ mod tests {
         let mut emit = Vec::new();
         
         let id = PpToken::Other('$');
-        assert_eq!(next_token(&mut source, &mut emit), Ok(id));
-        assert_eq!(next_token(&mut source, &mut emit), Ok(PpToken::Comma));
+        assert_eq!(next_token(&mut source, &mut emit)?.token, id);
+        assert_eq!(next_token(&mut source, &mut emit)?.token, PpToken::Comma);
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_has_location() -> Result<(), CcError> {        
+        let mut source = Source::new();
+        let text = vec![' ', '$', '\n', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+
+        let token = next_token(&mut source, &mut emit)?;
+        let id = PpToken::Other('$');
+        assert_eq!(token.token, id);
+        assert_eq!(token.loc, Point{ file: 0, line: 1, col: 2});
+
+        let token = next_token(&mut source, &mut emit)?;
+        assert_eq!(token.token, PpToken::Comma);
+        assert_eq!(token.loc, Point{ file: 0, line: 2, col: 1});
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_has_line_start_flag() -> Result<(), CcError> {        
+        let mut source = Source::new();
+        let text = vec![' ', '#', '$', '\n', '\t', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+
+        let token = next_token(&mut source, &mut emit)?;
+        assert_eq!(token.token, PpToken::Hash);
+        assert_eq!(token.loc, Point{ file: 0, line: 1, col: 2});
+        assert!(token.starts_line);
+    
+
+        let token = next_token(&mut source, &mut emit)?;
+        let id = PpToken::Other('$');
+        assert_eq!(token.token, id);
+        assert_eq!(token.loc, Point{ file: 0, line: 1, col: 3});
+        assert!(!token.starts_line);
+
+        let token = next_token(&mut source, &mut emit)?;
+        assert_eq!(token.token, PpToken::Comma);
+        assert_eq!(token.loc, Point{ file: 0, line: 2, col: 2});
+        assert!(token.starts_line);
+
+        Ok(())
+    }
+
+    #[test]
+    fn comments_dont_affect_line_start_flag() -> Result<(), CcError> {        
+        let mut source = Source::new();
+        let text = vec!['\n', '/', '*', '*', '/', ','];
+
+        source.push_data(&PathBuf::from("abc"), text);
+
+        let mut emit = Vec::new();
+
+        let token = next_token(&mut source, &mut emit)?;
+        assert_eq!(token.token, PpToken::Comma);
+        assert_eq!(token.loc, Point{ file: 0, line: 2, col: 5});
+        assert!(token.starts_line);
 
         Ok(())
     }
